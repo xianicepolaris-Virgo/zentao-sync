@@ -13,9 +13,12 @@ param(
     [string]$Reviewer,
     [switch]$NoReview,
     [switch]$AcceptRemote,
+    [switch]$Recreate,
     [string]$Comment,
     [int]$Pri = 3,
     [string]$Category = 'feature',
+    [string]$Source,
+    [string]$Extra,
     [string]$Name,
     [string]$AssignedTo,
     [string]$Type = 'devel',
@@ -37,6 +40,10 @@ $DefaultUrl = ''
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $Utf8Bom = New-Object System.Text.UTF8Encoding($true)
 $script:Token = ''
+$script:Plain = ''
+$script:LinkNote = ''
+$script:WebSess = $null
+$script:WebLoginText = ''
 $script:Api = ''
 $script:CurrentAccount = ''
 
@@ -55,16 +62,18 @@ function Get-Config {
     $accounts = @()
     $url = $DefaultUrl
     $current = ''
+    $source = ''
     if ($null -ne $c) {
+        if ($c.PSObject.Properties.Name -contains 'source' -and $c.source) { $source = [string]$c.source }
         if ($c.url) { $url = [string]$c.url }
         if ($c.current) { $current = [string]$c.current }
         foreach ($a in $c.accounts) { if ($null -ne $a) { $accounts += $a } }
     }
-    return @{ url = $url; current = $current; accounts = $accounts }
+    return @{ url = $url; current = $current; accounts = $accounts; source = $source }
 }
 
 function Save-Config($cfg) {
-    $obj = New-Object PSObject -Property @{ url = $cfg.url; current = $cfg.current; accounts = @($cfg.accounts) }
+    $obj = New-Object PSObject -Property @{ url = $cfg.url; current = $cfg.current; accounts = @($cfg.accounts); source = [string]$cfg.source }
     [System.IO.File]::WriteAllText($ConfigFile, (ConvertTo-Json -InputObject $obj -Depth 6), $Utf8NoBom)
 }
 
@@ -118,6 +127,15 @@ function Write-SyncLog([string]$act, [string]$mdPath, [string]$storyId, [string]
 
 # ---------- output ----------
 function Out-Result($hash) {
+    # add clickable ZenTao page links for whatever ids are in the result
+    if ($script:Api) {
+        $base = $script:Api -replace '/api\.php/v1$', ''
+        if ($hash.ContainsKey('storyId') -and [int]$hash['storyId'] -gt 0) { $hash['storyUrl'] = $base + '/story-view-' + [int]$hash['storyId'] + '.html' }
+        if ($hash.ContainsKey('taskId') -and [int]$hash['taskId'] -gt 0) { $hash['taskUrl'] = $base + '/task-view-' + [int]$hash['taskId'] + '.html' }
+        if ($hash.ContainsKey('project') -and [int]$hash['project'] -gt 0) { $hash['projectStoryUrl'] = $base + '/projectstory-story-' + [int]$hash['project'] + '.html' }
+        if ($hash.ContainsKey('execution') -and [int]$hash['execution'] -gt 0) { $hash['executionTaskUrl'] = $base + '/execution-task-' + [int]$hash['execution'] + '.html' }
+    }
+    if ($script:LinkNote -and -not $hash.ContainsKey('projectLink')) { $hash['projectLink'] = $script:LinkNote }
     $obj = New-Object PSObject -Property $hash
     Write-Output (ConvertTo-Json -InputObject $obj -Depth 8)
 }
@@ -136,13 +154,18 @@ function Invoke-Zt([string]$Method, [string]$Path, $Body) {
         $resp = Invoke-WebRequest @p
         $text = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
     } catch {
-        $msg = $_.Exception.Message
+        $err0 = $_
+        $msg = $err0.Exception.Message
         $bodyText = ''
         try {
-            $stream = $_.Exception.Response.GetResponseStream()
+            $stream = $err0.Exception.Response.GetResponseStream()
+            if ($stream.CanSeek) { $stream.Position = 0 }
             $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
             $bodyText = $reader.ReadToEnd()
         } catch { }
+        if (-not $bodyText) {
+            try { if ($err0.ErrorDetails -and $err0.ErrorDetails.Message) { $bodyText = [string]$err0.ErrorDetails.Message } } catch { }
+        }
         throw ('API ' + $Method + ' ' + $Path + ' failed: ' + $msg + ' ' + $bodyText)
     }
     if ([string]::IsNullOrWhiteSpace($text)) { return $null }
@@ -170,6 +193,7 @@ function Connect-Zt {
     if ($null -eq $acc) { throw ('NOT_LOGGED_IN: account not found: ' + $cfg.current) }
     $script:CurrentAccount = [string]$acc.account
     $plain = Get-Plain (ConvertTo-SecureString ([string]$acc.password))
+    $script:Plain = $plain
     $r = Invoke-Zt 'POST' '/tokens' @{ account = $script:CurrentAccount; password = $plain }
     if ($null -eq $r -or -not $r.token) { throw 'LOGIN_FAILED: no token returned' }
     $script:Token = [string]$r.token
@@ -315,10 +339,126 @@ function Split-List([string]$s) {
     return , $out
 }
 
+function Get-StoryOrNull([int]$sid) {
+    # returns $null when the story was deleted in ZenTao (404, or deleted flag set)
+    $st = $null
+    try { $st = Invoke-Zt 'GET' ('/stories/' + $sid) $null }
+    catch {
+        $m = [string]$_.Exception.Message
+        if ($m -match '\(404\)' -or $m -match '(?i)not found') { return $null }
+        throw
+    }
+    if ($null -eq $st) { return $null }
+    if ($st.PSObject.Properties.Name -contains 'deleted') {
+        $del = [string]$st.deleted
+        if ($del -eq '1' -or $del -eq 'True') { return $null }
+    }
+    return $st
+}
+
+function Set-Prop($obj, [string]$name, $value) {
+    if ($obj.PSObject.Properties.Name -contains $name) { $obj.$name = $value }
+    else { $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+}
+
+function Get-PendingProject($entry) {
+    if ($null -ne $entry -and ($entry.PSObject.Properties.Name -contains 'pendingProject') -and $entry.pendingProject) { return [int]$entry.pendingProject }
+    return 0
+}
+
+function Get-EntryProject($entry) {
+    if ($null -ne $entry -and ($entry.PSObject.Properties.Name -contains 'project') -and $entry.project) { return [int]$entry.project }
+    return 0
+}
+
 function Get-TaskList($entry) {
     $tasks = @()
     if ($null -ne $entry -and $null -ne $entry.tasks) { foreach ($t in $entry.tasks) { if ($null -ne $t) { $tasks += $t } } }
     return , $tasks
+}
+
+function Add-Extra($body) {
+    # -Extra "key=value;key2=value2" adds any extra API fields (for site-specific required fields)
+    if (-not $Extra) { return }
+    foreach ($pair in $Extra.Split(';')) {
+        $idx = $pair.IndexOf('=')
+        if ($idx -le 0) { continue }
+        $k = $pair.Substring(0, $idx).Trim()
+        $v = $pair.Substring($idx + 1).Trim()
+        if ($v -match '^\d+$') { $body[$k] = [int]$v } else { $body[$k] = $v }
+    }
+}
+
+function Get-Short([string]$t, [int]$n) {
+    if ($null -eq $t) { return '' }
+    if ($t.Length -gt $n) { return $t.Substring(0, $n) }
+    return $t
+}
+
+function Get-WebSession {
+    # The REST token is not a web session. Some actions have no REST endpoint, so log in to the
+    # web side once per run with the saved account (in memory only) and reuse that session.
+    if ($null -ne $script:WebSess) { return $script:WebSess }
+    $base = $script:Api -replace '/api\.php/v1$', ''
+    $sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $u = [System.Uri]$base
+    $r1 = Invoke-WebRequest -Uri ($base + '/index.php?m=api&f=getSessionID&t=json') -WebSession $sess -UseBasicParsing -TimeoutSec 60
+    try {
+        $j1 = ConvertFrom-Json ([string]$r1.Content)
+        $d1 = $j1.data
+        if ($d1 -is [string]) { $d1 = ConvertFrom-Json $d1 }
+        if ($d1.sessionName -and $d1.sessionID) {
+            $sess.Cookies.Add((New-Object System.Net.Cookie([string]$d1.sessionName, [string]$d1.sessionID, '/', $u.Host)))
+        }
+    } catch { }
+    $loginBody = 'account=' + [System.Uri]::EscapeDataString($script:CurrentAccount) + '&password=' + [System.Uri]::EscapeDataString($script:Plain) + '&keepLogin=0'
+    $r2 = Invoke-WebRequest -Uri ($base + '/index.php?m=user&f=login&t=json') -Method POST -Body $loginBody `
+        -ContentType 'application/x-www-form-urlencoded' -Headers @{ 'X-Requested-With' = 'XMLHttpRequest' } -WebSession $sess -UseBasicParsing -TimeoutSec 60
+    $script:WebLoginText = [string]$r2.Content
+    $script:WebSess = $sess
+    return $sess
+}
+
+function Invoke-WebForm([string]$query, [string]$form) {
+    $base = $script:Api -replace '/api\.php/v1$', ''
+    $sess = Get-WebSession
+    $resp = Invoke-WebRequest -Uri ($base + '/index.php?' + $query + '&t=json') -Method POST -Body $form `
+        -ContentType 'application/x-www-form-urlencoded' -Headers @{ 'X-Requested-With' = 'XMLHttpRequest' } -WebSession $sess -UseBasicParsing -TimeoutSec 60
+    return [string]$resp.Content
+}
+
+function Submit-StoryReview([int]$sid, $reviewers) {
+    # A story created through REST v1 stays in draft. Submit it the way the web page does:
+    # with reviewers -> reviewing; without -> "no review needed" -> active.
+    $form = 'needNotReview=1'
+    if ($reviewers.Count -gt 0) {
+        $form = (@($reviewers | ForEach-Object { 'reviewer%5B%5D=' + [System.Uri]::EscapeDataString([string]$_) }) -join '&')
+    }
+    try { return (Get-Short (Invoke-WebForm ('m=story&f=submitReview&storyID=' + $sid + '&storyType=story') $form) 200) }
+    catch { return [string]$_.Exception.Message }
+}
+
+function Test-StoryInProject([int]$sid, [int]$projId) {
+    try {
+        $r = Invoke-Zt 'GET' ('/projects/' + $projId + '/stories?limit=2000') $null
+        foreach ($x in $r.stories) { if ($null -ne $x -and [int]$x.id -eq $sid) { return $true } }
+    } catch { }
+    return $false
+}
+
+function Connect-StoryToProject([int]$sid, [int]$projId, [int]$prod) {
+    # REST v1 has no "link story to project" endpoint, so post the same form the web page uses,
+    # then verify through the API. Returns 'LINKED' or 'LINK_FAILED: reason'.
+    if (Test-StoryInProject $sid $projId) { return 'LINKED' }
+    $base = $script:Api -replace '/api\.php/v1$', ''
+    $form = 'stories%5B%5D=' + $sid + '&products%5B' + $sid + '%5D=' + $prod
+    $why = ''
+    try {
+        $t = Invoke-WebForm ('m=projectstory&f=linkStory&projectID=' + $projId) $form
+        $why = 'link=' + (Get-Short $t 200) + ' | login=' + (Get-Short $script:WebLoginText 150)
+    } catch { $why = [string]$_.Exception.Message }
+    if (Test-StoryInProject $sid $projId) { return 'LINKED' }
+    return ('LINK_FAILED: ' + $why)
 }
 
 # ---------- actions ----------
@@ -399,17 +539,30 @@ function Do-Login {
         $cfg.url = $d.url
         $acc = $d.account
         if (-not $d.url -or -not $d.account -or -not $d.password) { $errText = 'URL / account / password required'; continue }
-        $script:Api = $cfg.url.TrimEnd('/') + '/api.php/v1'
+        # normalize: add http://, drop page names like /my.html, then also try with /zentao
+        $nu = [string]$d.url
+        if ($nu -notmatch '^https?://') { $nu = 'http://' + $nu }
+        $nu = [regex]::Replace($nu, '/[^/]*\.(html|php).*$', '')
+        $nu = $nu.TrimEnd('/')
+        $candidates = @($nu)
+        if ($nu -notmatch '/zentao$') { $candidates += ($nu + '/zentao') }
         $script:CurrentAccount = $acc
         $script:Token = ''
-        try {
-            $r = Invoke-Zt 'POST' '/tokens' @{ account = $acc; password = $d.password }
-            if ($null -eq $r -or -not $r.token) { throw 'no token returned' }
-        } catch {
-            $errText = [string]$_.Exception.Message
-            if ($errText.Length -gt 110) { $errText = $errText.Substring(0, 110) }
-            continue
+        $okUrl = ''
+        foreach ($cand in $candidates) {
+            $script:Api = $cand + '/api.php/v1'
+            try {
+                $r = Invoke-Zt 'POST' '/tokens' @{ account = $acc; password = $d.password }
+                if ($null -eq $r -or -not $r.token) { throw 'no token returned' }
+                $okUrl = $cand
+                break
+            } catch {
+                $errText = [string]$_.Exception.Message
+                if ($errText.Length -gt 110) { $errText = $errText.Substring(0, 110) }
+            }
         }
+        if (-not $okUrl) { $cfg.url = $nu; continue }
+        $cfg.url = $okUrl
         $secure = ConvertTo-SecureString $d.password -AsPlainText -Force
         break
     }
@@ -452,33 +605,97 @@ function Do-Sync {
     $entry = Find-Entry $list $mdPath
     Connect-Zt
     $reviewers = Split-List $Reviewer
+    $recreatedFrom = 0
+    $oldTasks = @()
+
+    if ($null -ne $entry) {
+        $oldId = [int]$entry.storyId
+        if ($null -eq (Get-StoryOrNull $oldId)) {
+            # the story was deleted in ZenTao
+            # drop the old mapping and publish the md again as a new story (same product / project)
+            $recreatedFrom = $oldId
+            $oldTasks = Get-TaskList $entry
+            if ($Product -le 0) { $Product = [int]$entry.product }
+            if ($Project -le 0) { $Project = Get-EntryProject $entry }
+            $list = @($list | Where-Object { [string]$_.md -ine $mdPath })
+            Save-Map $list
+            Write-SyncLog 'story-recreate' $mdPath ([string]$oldId) '' 'OK' 'story was deleted in zentao: old mapping dropped, creating a new story'
+            $entry = $null
+        }
+    }
 
     if ($null -eq $entry) {
         if ($Product -le 0) { throw 'NEED_PRODUCT: new story needs -Product <id>. Run "products" and ask the user which product.' }
         $t = Get-MdTitle $text $mdPath
         $body = @{ title = $t; product = $Product; pri = $Pri; category = $Category; spec = (Convert-MdToHtml $text) }
         if ($reviewers.Count -gt 0) { $body['reviewer'] = $reviewers }
-        elseif ($NoReview) { $body['needNotReview'] = 1 }
+        else { $body['needNotReview'] = 1 }
         if ($AssignedTo) { $body['assignedTo'] = $AssignedTo }
+        # source: use -Source if given and remember it; otherwise reuse the remembered one
+        $src = $Source
+        $cfg2 = Get-Config
+        if ($src) { if ($src -ne $cfg2.source) { $cfg2.source = $src; Save-Config $cfg2 } }
+        else { $src = $cfg2.source }
+        if ($src) { $body['source'] = $src }
+        Add-Extra $body
         $r = Invoke-Zt 'POST' '/stories' $body
         $sid = [int]$r.id
         if ($sid -le 0) { throw ('CREATE_FAILED: no story id returned: ' + (ConvertTo-Json -InputObject $r -Compress -Depth 4)) }
         $s = Invoke-Zt 'GET' ('/stories/' + $sid) $null
+        $reviewNote = ''
+        if ([string]$s.status -eq 'draft') {
+            $submitText = Submit-StoryReview $sid $reviewers
+            $s = Invoke-Zt 'GET' ('/stories/' + $sid) $null
+            if ([string]$s.status -eq 'draft') { $reviewNote = 'SUBMIT_FAILED: story is still draft. ' + $submitText }
+            elseif ($reviewers.Count -gt 0) { $reviewNote = 'SUBMITTED_FOR_REVIEW: ' + $Reviewer }
+            else { $reviewNote = 'NO_REVIEW: activated without review' }
+            Write-SyncLog 'story-submit-review' $mdPath ([string]$sid) '' $reviewNote ''
+        }
         $new = New-Object PSObject -Property @{
             md = $mdPath; storyId = $sid; product = $Product; title = $t; hash = $hash
             version = [int]$s.version; account = $script:CurrentAccount
-            updated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); tasks = @()
+            updated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); tasks = @(); project = $Project
         }
         $list += $new
         Save-Map $list
         Write-SyncLog 'story-create' $mdPath ([string]$sid) '' 'OK' $t
-        Out-Result @{ result = 'CREATED'; storyId = $sid; title = $t; status = [string]$s.status; version = [int]$s.version }
+        $link = ''
+        if ($Project -gt 0) {
+            $link = Connect-StoryToProject $sid $Project $Product
+            if ($link -ne 'LINKED' -and ([string]$s.status -eq 'reviewing' -or [string]$s.status -eq 'draft')) {
+                # ZenTao only lets reviewed (active) stories be linked to a project: retry automatically later
+                $link = 'LINK_PENDING_REVIEW: story status is ' + [string]$s.status + '; it will be linked to project ' + $Project + ' on the next sync after the review passes'
+                $new.project = 0
+                Set-Prop $new 'pendingProject' $Project
+                Save-Map $list
+            }
+            Write-SyncLog 'story-link-project' $mdPath ([string]$sid) '' $link ('project=' + $Project)
+        }
+        $res = 'CREATED'
+        if ($recreatedFrom -gt 0) { $res = 'RECREATED' }
+        Out-Result @{ result = $res; recreatedFrom = $recreatedFrom; oldTasks = $oldTasks; storyId = $sid; title = $t; status = [string]$s.status; version = [int]$s.version; project = $Project; projectLink = $link; reviewNote = $reviewNote }
         return
     }
 
     $sid = [int]$entry.storyId
     $s = Invoke-Zt 'GET' ('/stories/' + $sid) $null
     $remoteVersion = [int]$s.version
+
+    $pp = Get-PendingProject $entry
+    if ($pp -gt 0) {
+        if ([string]$s.status -eq 'active') {
+            $lk = Connect-StoryToProject $sid $pp ([int]$entry.product)
+            if ($lk -eq 'LINKED') {
+                Set-Prop $entry 'project' $pp
+                Set-Prop $entry 'pendingProject' 0
+                Save-Map $list
+            }
+            $script:LinkNote = $lk
+            Write-SyncLog 'story-link-project' $mdPath ([string]$sid) '' $lk ('project=' + $pp)
+        } else {
+            $script:LinkNote = 'LINK_PENDING_REVIEW: story status is ' + [string]$s.status + '; project ' + $pp + ' not linked yet'
+        }
+    }
 
     if ($remoteVersion -ne [int]$entry.version) {
         if ($AcceptRemote) {
@@ -511,7 +728,7 @@ function Do-Sync {
 
     $t = Get-MdTitle $text $mdPath
     if ($hash -eq [string]$entry.hash -and $t -eq [string]$entry.title) {
-        Out-Result @{ result = 'NO_CHANGE'; storyId = $sid; version = $remoteVersion; status = [string]$s.status }
+        Out-Result @{ result = 'NO_CHANGE'; storyId = $sid; version = $remoteVersion; status = [string]$s.status; project = (Get-EntryProject $entry) }
         return
     }
     if ($reviewers.Count -eq 0 -and -not $NoReview) {
@@ -524,6 +741,7 @@ function Do-Sync {
     $body = @{ title = $t; spec = (Convert-MdToHtml $text) }
     if ($reviewers.Count -gt 0) { $body['reviewer'] = $reviewers } else { $body['needNotReview'] = 1 }
     if ($Comment) { $body['comment'] = $Comment }
+    Add-Extra $body
     [void](Invoke-Zt 'POST' ('/stories/' + $sid + '/change') $body)
     $s2 = Invoke-Zt 'GET' ('/stories/' + $sid) $null
     $entry.hash = $hash
@@ -533,10 +751,48 @@ function Do-Sync {
     Save-Map $list
     Write-SyncLog 'story-change' $mdPath ([string]$sid) '' 'OK' ('v' + $remoteVersion + ' -> v' + [int]$s2.version + ' reviewer=' + $Reviewer)
     Out-Result @{
-        result = 'CHANGED'; storyId = $sid; version = [int]$s2.version; status = [string]$s2.status
+        result = 'CHANGED'; storyId = $sid; version = [int]$s2.version; status = [string]$s2.status; project = (Get-EntryProject $entry)
         tasks = (Get-TaskList $entry)
         next = 'If tasks is not empty, update each affected task with task-update.'
     }
+}
+
+function Do-LinkProject {
+    $mdPath = Resolve-Md
+    if ($Project -le 0) { throw 'MISSING_PARAM: -Project <project id> is required' }
+    $list = Get-Map
+    $entry = Find-Entry $list $mdPath
+    if ($null -eq $entry) { throw 'NOT_SYNCED: run sync for this md first' }
+    Connect-Zt
+    $st = Get-StoryOrNull ([int]$entry.storyId)
+    if ($null -eq $st) { Out-Result @{ result = 'REMOTE_DELETED'; oldStoryId = [int]$entry.storyId }; return }
+    $link = Connect-StoryToProject ([int]$entry.storyId) $Project ([int]$entry.product)
+    if ($link -eq 'LINKED') {
+        Set-Prop $entry 'project' $Project
+        Set-Prop $entry 'pendingProject' 0
+        Save-Map $list
+    } elseif ([string]$st.status -eq 'reviewing' -or [string]$st.status -eq 'draft') {
+        $link = 'LINK_PENDING_REVIEW: story status is ' + [string]$st.status + '; it will be linked to project ' + $Project + ' on the next sync after the review passes'
+        Set-Prop $entry 'pendingProject' $Project
+        Save-Map $list
+    }
+    Write-SyncLog 'story-link-project' $mdPath ([string]$entry.storyId) '' $link ('project=' + $Project)
+    Out-Result @{ result = $link; storyId = [int]$entry.storyId; project = $Project; status = [string]$st.status }
+}
+
+function Do-CheckDeleted {
+    # scan every synced md and report the ones whose story no longer exists in ZenTao
+    $list = Get-Map
+    Connect-Zt
+    $gone = @()
+    $alive = 0
+    foreach ($e in $list) {
+        if ($null -eq (Get-StoryOrNull ([int]$e.storyId))) {
+            $gone += (New-Object PSObject -Property @{ md = [string]$e.md; oldStoryId = [int]$e.storyId; title = [string]$e.title })
+            Write-SyncLog 'story-deleted-detected' ([string]$e.md) ([string]$e.storyId) '' 'REMOTE_DELETED' ''
+        } else { $alive++ }
+    }
+    Out-Result @{ result = 'OK'; deleted = $gone; aliveCount = $alive; next = 'Run sync on each deleted md to publish it again as a new story.' }
 }
 
 function Do-Status {
@@ -545,9 +801,13 @@ function Do-Status {
     $entry = Find-Entry $list $mdPath
     if ($null -eq $entry) { Out-Result @{ result = 'NOT_SYNCED'; md = $mdPath }; return }
     Connect-Zt
-    $s = Invoke-Zt 'GET' ('/stories/' + [int]$entry.storyId) $null
+    $s = Get-StoryOrNull ([int]$entry.storyId)
+    if ($null -eq $s) {
+        Out-Result @{ result = 'REMOTE_DELETED'; oldStoryId = [int]$entry.storyId; oldTasks = (Get-TaskList $entry) }
+        return
+    }
     Out-Result @{
-        result = 'OK'; storyId = [int]$entry.storyId; title = [string]$s.title; status = [string]$s.status
+        result = 'OK'; storyId = [int]$entry.storyId; title = [string]$s.title; status = [string]$s.status; project = (Get-EntryProject $entry)
         remoteVersion = [int]$s.version; localVersion = [int]$entry.version
         localChanged = ((Get-FileHash256 $mdPath) -ne [string]$entry.hash)
         remoteChanged = ([int]$s.version -ne [int]$entry.version)
@@ -569,6 +829,7 @@ function Do-TaskAdd {
     if ($Deadline) { $body['deadline'] = $Deadline }
     if ($Estimate) { $body['estimate'] = [double]$Estimate }
     if ($Desc) { $body['desc'] = (Convert-MdToHtml $Desc) }
+    Add-Extra $body
     $r = Invoke-Zt 'POST' ('/executions/' + $Execution + '/tasks') $body
     $tid = [int]$r.id
     if ($tid -le 0) { throw ('CREATE_FAILED: no task id returned: ' + (ConvertTo-Json -InputObject $r -Compress -Depth 4)) }
@@ -609,7 +870,9 @@ function Do-TaskUpdate {
     Save-Map $list
     $changed = @($body.Keys) -join '/'
     Write-SyncLog 'task-update' $mdPath $sid ([string]$TaskId) 'OK' ('fields=' + $changed)
-    Out-Result @{ result = 'TASK_UPDATED'; taskId = $TaskId; fields = $changed }
+    $h = @{ result = 'TASK_UPDATED'; taskId = $TaskId; fields = $changed }
+    if ($sid) { $h['storyId'] = [int]$sid }
+    Out-Result $h
 }
 
 function Do-List([string]$path, [string]$key) {
@@ -657,13 +920,15 @@ try {
         'users' { Do-List '/users?limit=1000' 'users' }
         'sync' { Do-Sync }
         'status' { Do-Status }
+        'check-deleted' { Do-CheckDeleted }
+        'link-project' { Do-LinkProject }
         'task-add' { Do-TaskAdd }
         'task-update' { Do-TaskUpdate }
         'log' { Do-Log }
         default {
             Out-Result @{
                 result = 'HELP'
-                actions = 'login use accounts test products projects executions users sync status task-add task-update log'
+                actions = 'login use accounts test products projects executions users sync status check-deleted link-project task-add task-update log'
                 data = $Home2
             }
         }
