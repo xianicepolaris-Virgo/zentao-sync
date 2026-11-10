@@ -30,15 +30,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<本技能目录>\zentao.ps
 - **用户没说明的字段一律不设置**，不要自己猜评审人、指派人、迭代、日期。
 - 缺了必填信息就问用户，一次只问缺的那一项。
 - md 全文原样同步，不要改写、删减、总结 md 内容。
-- 每次操作后用一句话告诉用户结果：需求编号、状态、改了哪些任务。
+- 每次操作后用一句话告诉用户结果：需求编号、状态、改了哪些任务，**并附上可点击的禅道链接**。链接直接用脚本返回的字段，不要自己拼：`storyUrl`（需求详情）、`projectStoryUrl`（所属项目的需求列表）、`taskUrl`（任务详情）、`executionTaskUrl`（迭代任务列表）。返回里有哪个就给哪个。
 
 ## sync 流程
 
 ```
-zentao.ps1 sync -Md "<md完整路径>" [-Product <产品ID>] [-Title "<标题>"] [-Reviewer acc1,acc2] [-NoReview] [-AssignedTo <账号>] [-Comment "<变更说明>"]
+zentao.ps1 sync -Md "<md完整路径>" [-Product <产品ID>] [-Source <来源>] [-Project <项目ID>] [-Title "<标题>"] [-Reviewer acc1,acc2] [-NoReview] [-AssignedTo <账号>] [-Comment "<变更说明>"]
 ```
 
 标题默认取 md 第一个 `# ` 标题，没有就用文件名；用户指定了标题才传 `-Title`。
+
+所属项目 `-Project`：禅道的需求建在"产品"下，要出现在某个项目的需求列表里，必须再关联到该项目。
+- 用户给了项目（名称、ID，或 `projectstory-story-607.html` 这类链接，607 就是项目 ID）：新建时带 `-Project <ID>`。只知道名称就先执行 `projects` 查 ID。
+- 用户没提项目：新建前问一句"要关联到哪个项目吗？"，用户说不用就不传。
+- 需求已经建好、要补关联：`zentao.ps1 link-project -Md "<md>" -Project <ID>`。
+- `LINK_PENDING_REVIEW...`：需求还在评审中/草稿，禅道只允许评审通过（激活）的需求关联项目。告诉用户：先在禅道把需求评审通过，之后再说一次"更新到禅道"，脚本会自动补关联，不用重新指定项目。
+- **新建需求默认不评审**：用户没指定评审人就不传 `-Reviewer`，脚本会按"不需要评审"提交，需求直接激活。用户指定了评审人才传 `-Reviewer`。
+- 新建返回的 `reviewNote`：`NO_REVIEW...` 已免评审激活；`SUBMITTED_FOR_REVIEW...` 已提交给评审人；`SUBMIT_FAILED...` 需求仍是草稿，把原文告诉用户，并提示他在禅道需求页点"提交评审"手动处理。
+- 返回里 `projectLink`（或 `result`）是 `LINKED` 表示成功；是 `LINK_FAILED...` 时把原文告诉用户，并提示他在禅道该项目的"需求"页点"关联需求"手动关联，不要重复创建需求。
+
+需求来源 `-Source`：这个禅道建需求时来源必填。可选值：customer 客户、user 用户、po 产品经理、market 市场、service 客服、operation 运营、support 技术支持、competitor 竞争对手、partner 合作伙伴、dev 开发人员、tester 测试人员、bug Bug、forum 论坛、other 其它。
+- 用户说了来源就传 `-Source`；脚本会记住，之后不传就沿用上一次的。
+- 报错 `『来源』不能为空` 说明还没记住过：问用户来源选哪个，带 `-Source` 重跑。
+
+禅道报其他"『xxx』不能为空"时：问用户该字段的值，用 `-Extra "字段名=值;字段名2=值2"` 补上重跑（字段名用报错 JSON 里的 key）。
 
 按返回的 `result` 处理：
 
@@ -50,6 +65,7 @@ zentao.ps1 sync -Md "<md完整路径>" [-Product <产品ID>] [-Title "<标题>"]
 | `NEED_REVIEWER` | md 变了，变更要走评审但没给评审人 | 问用户评审人是谁（可执行 `users` 把姓名换成账号），带 `-Reviewer` 重跑。只有用户明确说"不用评审"才用 `-NoReview` |
 | `CHANGED` | 已提交变更 | 看返回的 `tasks`，不为空就按"任务"一节更新受影响的任务 |
 | `REMOTE_CHANGED` | 有人在禅道上改过这个需求 | **以禅道为主**，见下 |
+| `RECREATED` | 原需求在禅道上被删了，脚本已自动重新发布为新需求 | 见下方"需求被删除后重新发布" |
 | `ERROR` | 失败 | 把 message 原样告诉用户；`NOT_LOGGED_IN` 按"账号"处理 |
 
 ### REMOTE_CHANGED（禅道为主）
@@ -59,6 +75,16 @@ zentao.ps1 sync -Md "<md完整路径>" [-Product <产品ID>] [-Title "<标题>"]
 3. 删除 `htmlFile`。
 4. 执行 `zentao.ps1 sync -Md "<md>" -AcceptRemote`。
 5. 告诉用户：禅道上有人改过，本地 md 已被禅道版本覆盖；如果刚才本地有改动，需要用户确认是否重新修改。
+
+### 需求被删除后重新发布（脚本自动处理）
+
+每次 `sync` 脚本都会先检查 md 对应的禅道需求是否还在。已被删除时，脚本**自动**清掉旧的对应关系，按当前 md 新建一个需求（新编号），沿用原来的产品、项目、来源，并返回 `RECREATED`。
+
+- **不要手动编辑 `map.json`**，也不要自己清关联，直接执行 `sync` 即可。
+- 返回 `RECREATED` 时告诉用户：原需求 #`recreatedFrom` 已被删除，已重新发布为 #`storyId`，并附链接。
+- 返回的 `oldTasks` 不为空时提醒用户：旧需求下的这些任务不会自动挂到新需求上，问是否在新需求下重建。
+- 用户问"哪些需求被删了"：执行 `zentao.ps1 check-deleted`，它只检查并列出，不会重新发布；要重新发布就对列出的 md 逐个执行 `sync`。
+- `status` 返回 `REMOTE_DELETED` 也表示已被删除。
 
 ## 任务
 
