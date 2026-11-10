@@ -15,7 +15,7 @@
 把本仓库克隆到你的技能目录下，文件夹名为 `zentao-sync`：
 
 ```
-git clone https://github.com/xianicepolaris-Virgo/zentao-sync "<技能目录>\zentao-sync"
+git clone https://github.com/<OWNER>/zentao-sync "<技能目录>\zentao-sync"
 ```
 
 常见技能目录：
@@ -26,20 +26,18 @@ git clone https://github.com/xianicepolaris-Virgo/zentao-sync "<技能目录>\ze
 | Claude Code | `%USERPROFILE%\.claude\skills` |
 | 其他支持 SKILL.md 的 agent | 以该 agent 文档为准 |
 
-没有 git 时：下载 `https://github.com/xianicepolaris-Virgo/zentao-sync/archive/refs/heads/main.zip`，解压后把文件夹改名为 `zentao-sync` 放进技能目录。
+没有 git 时：下载 `https://github.com/<OWNER>/zentao-sync/archive/refs/heads/main.zip`，解压后把文件夹改名为 `zentao-sync` 放进技能目录。
 
 不支持技能的 agent：克隆到任意目录，在它的规则文件（如 `AGENTS.md`）里加一句：
 "涉及禅道时，先读 `<路径>\zentao-sync\SKILL.md` 并照做。"
 
 更新：在 `zentao-sync` 目录里执行 `git pull`。
 
-## 首次登录（用户自己执行，不要让 agent 代输密码）
+## 登录
 
-```
-powershell -NoProfile -ExecutionPolicy Bypass -File "<技能目录>\zentao-sync\zentao.ps1" login -Account <禅道账号> -Url http://<禅道服务器>/zentao
-```
+对 agent 说"登录禅道"，电脑上会弹出登录窗口，填禅道地址、账号、密码后点"登录"即可。也可以直接双击技能目录里的 `login.bat`。
 
-密码用 Windows DPAPI 加密后存在本机 `%USERPROFILE%\.zentao-sync\config.json`，不会上传。
+密码只在弹窗里输入，用 Windows DPAPI 加密后存在本机 `%USERPROFILE%\.zentao-sync\config.json`，不会上传，也不经过 agent。
 
 ## 使用
 

@@ -26,7 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<本技能目录>\zentao.ps
 
 ## 硬规则
 
-- **绝不在对话里索要或接收禅道密码。** 需要登录时，让用户自己打开 PowerShell 执行 login 命令（见"账号"）。
+- **绝不在对话里索要或接收禅道密码。** 需要登录时执行 `zentao.ps1 login` 弹出登录窗口（见"账号"）。
 - **用户没说明的字段一律不设置**，不要自己猜评审人、指派人、迭代、日期。
 - 缺了必填信息就问用户，一次只问缺的那一项。
 - md 全文原样同步，不要改写、删减、总结 md 内容。
@@ -77,12 +77,12 @@ zentao.ps1 task-update -TaskId <任务ID> [-Name ..] [-Desc ..] [-AssignedTo ..]
 
 ## 账号
 
-- 首次使用或 `NOT_LOGGED_IN`：让用户自己在 PowerShell 里执行（密码只在他的窗口里输入，加密存在本机）：
-  ```
-  powershell -NoProfile -ExecutionPolicy Bypass -File "<本技能目录>\zentao.ps1" login -Account <禅道账号> -Url <禅道地址，如 http://服务器/zentao>
-  ```
-  `-Url` 只在第一次登录时需要，之后会记住。
-- 切换账号：`zentao.ps1 use -Account <账号>`；该账号没登录过就让用户执行上面的 login。
+- 首次使用、`NOT_LOGGED_IN`、或用户说"登录禅道"：你直接执行 `zentao.ps1 login`。电脑上会弹出一个登录窗口，告诉用户在窗口里填禅道地址、账号、密码并点"登录"。命令会一直等到窗口关闭，不要中断它。
+  - 返回 `OK`：登录成功，继续之前的操作。
+  - 返回 `CANCELLED`：用户关了窗口，停止并告知。
+  - 窗口弹不出来（你的运行环境没有桌面）：让用户双击本技能目录下的 `login.bat`。
+- 密码只在弹窗里输入，加密存在本机。不要在对话里问密码，也不要把密码放进命令行。
+- 切换账号：`zentao.ps1 use -Account <账号>`；该账号没登录过就执行 `zentao.ps1 login -Account <账号>` 弹窗登录。
 - 查看当前账号：`zentao.ps1 accounts`。
 - 自检：`zentao.ps1 test`。
 

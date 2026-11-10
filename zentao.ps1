@@ -322,16 +322,98 @@ function Get-TaskList($entry) {
 }
 
 # ---------- actions ----------
+function U([int[]]$codes) { return (-join ($codes | ForEach-Object { [char]$_ })) }
+
+function Show-LoginDialog([string]$u, [string]$a, [string]$errText) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = (U 0x7985, 0x9053, 0x767B, 0x5F55)
+    $f.ClientSize = New-Object System.Drawing.Size(420, 215)
+    $f.StartPosition = 'CenterScreen'
+    $f.FormBorderStyle = 'FixedDialog'
+    $f.MaximizeBox = $false
+    $f.MinimizeBox = $false
+    $f.TopMost = $true
+    $labels = @((U 0x7985, 0x9053, 0x5730, 0x5740), (U 0x8D26, 0x53F7), (U 0x5BC6, 0x7801))
+    $boxes = @()
+    for ($k = 0; $k -lt 3; $k++) {
+        $l = New-Object System.Windows.Forms.Label
+        $l.Text = $labels[$k]
+        $l.Location = New-Object System.Drawing.Point(20, (23 + 40 * $k))
+        $l.Size = New-Object System.Drawing.Size(80, 20)
+        $f.Controls.Add($l)
+        $t = New-Object System.Windows.Forms.TextBox
+        $t.Location = New-Object System.Drawing.Point(105, (20 + 40 * $k))
+        $t.Size = New-Object System.Drawing.Size(290, 24)
+        $f.Controls.Add($t)
+        $boxes += $t
+    }
+    $boxes[0].Text = $u
+    $boxes[1].Text = $a
+    $boxes[2].UseSystemPasswordChar = $true
+    $e = New-Object System.Windows.Forms.Label
+    $e.Text = $errText
+    $e.ForeColor = [System.Drawing.Color]::Red
+    $e.Location = New-Object System.Drawing.Point(20, 135)
+    $e.Size = New-Object System.Drawing.Size(380, 34)
+    $f.Controls.Add($e)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = (U 0x767B, 0x5F55)
+    $ok.Location = New-Object System.Drawing.Point(215, 175)
+    $ok.Size = New-Object System.Drawing.Size(85, 28)
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $f.Controls.Add($ok)
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = (U 0x53D6, 0x6D88)
+    $cancel.Location = New-Object System.Drawing.Point(310, 175)
+    $cancel.Size = New-Object System.Drawing.Size(85, 28)
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $f.Controls.Add($cancel)
+    $f.AcceptButton = $ok
+    $f.CancelButton = $cancel
+    $focus = $boxes[2]
+    if (-not $u) { $focus = $boxes[0] } elseif (-not $a) { $focus = $boxes[1] }
+    $f.Add_Shown({ $f.Activate(); [void]$focus.Focus() })
+    $res = $f.ShowDialog()
+    $out = $null
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
+        $out = @{ url = $boxes[0].Text.Trim(); account = $boxes[1].Text.Trim(); password = $boxes[2].Text }
+    }
+    $f.Dispose()
+    return $out
+}
+
 function Do-Login {
-    if (-not $Account) { throw 'MISSING_PARAM: -Account is required' }
+    # Opens a login window. The password is typed there, never passed on the command line.
     $cfg = Get-Config
     if ($Url) { $cfg.url = $Url }
-    if (-not $cfg.url) { throw 'MISSING_PARAM: first login needs -Url <zentao base url>, e.g. -Url http://server/zentao' }
-    $secure = Read-Host -AsSecureString ('ZenTao password for ' + $Account)
-    $script:Api = $cfg.url.TrimEnd('/') + '/api.php/v1'
-    $script:CurrentAccount = $Account
-    $r = Invoke-Zt 'POST' '/tokens' @{ account = $Account; password = (Get-Plain $secure) }
-    if ($null -eq $r -or -not $r.token) { throw 'LOGIN_FAILED: no token returned' }
+    $acc = $Account
+    if (-not $acc) { $acc = $cfg.current }
+    $errText = ''
+    $secure = $null
+    while ($true) {
+        $d = Show-LoginDialog $cfg.url $acc $errText
+        if ($null -eq $d) { Out-Result @{ result = 'CANCELLED'; message = 'user closed the login window' }; return }
+        $cfg.url = $d.url
+        $acc = $d.account
+        if (-not $d.url -or -not $d.account -or -not $d.password) { $errText = 'URL / account / password required'; continue }
+        $script:Api = $cfg.url.TrimEnd('/') + '/api.php/v1'
+        $script:CurrentAccount = $acc
+        $script:Token = ''
+        try {
+            $r = Invoke-Zt 'POST' '/tokens' @{ account = $acc; password = $d.password }
+            if ($null -eq $r -or -not $r.token) { throw 'no token returned' }
+        } catch {
+            $errText = [string]$_.Exception.Message
+            if ($errText.Length -gt 110) { $errText = $errText.Substring(0, 110) }
+            continue
+        }
+        $secure = ConvertTo-SecureString $d.password -AsPlainText -Force
+        break
+    }
+    $Account = $acc
     $others = @()
     foreach ($a in $cfg.accounts) { if ([string]$a.account -ne $Account) { $others += $a } }
     $others += (New-Object PSObject -Property @{ account = $Account; password = (ConvertFrom-SecureString $secure) })
