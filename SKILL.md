@@ -3,6 +3,7 @@ name: zentao-sync
 description: 把需求 md 同步到自建禅道。新建或修改需求 md 后自动使用；用户说"同步禅道/下需求/派任务/改任务/切换禅道账号/看同步日志"时使用。一个 md 对应一个禅道需求，md 更新后走禅道"变更需求"并同步修改关联任务。
 version: 1.0
 trigger_keywords: [禅道, 同步禅道, 下需求, 派任务, 变更需求, 切换禅道账号, 同步日志]
+
 ---
 
 # 禅道需求同步
@@ -41,6 +42,7 @@ zentao.ps1 sync -Md "<md完整路径>" [-Product <产品ID>] [-Source <来源>] 
 标题默认取 md 第一个 `# ` 标题，没有就用文件名；用户指定了标题才传 `-Title`。
 
 所属项目 `-Project`：禅道的需求建在"产品"下，要出现在某个项目的需求列表里，必须再关联到该项目。
+
 - 用户给了项目（名称、ID，或 `projectstory-story-607.html` 这类链接，607 就是项目 ID）：新建时带 `-Project <ID>`。只知道名称就先执行 `projects` 查 ID。
 - 用户没提项目：新建前问一句"要关联到哪个项目吗？"，用户说不用就不传。
 - 需求已经建好、要补关联：`zentao.ps1 link-project -Md "<md>" -Project <ID>`。
@@ -50,6 +52,7 @@ zentao.ps1 sync -Md "<md完整路径>" [-Product <产品ID>] [-Source <来源>] 
 - 返回里 `projectLink`（或 `result`）是 `LINKED` 表示成功；是 `LINK_FAILED...` 时把原文告诉用户，并提示他在禅道该项目的"需求"页点"关联需求"手动关联，不要重复创建需求。
 
 需求来源 `-Source`：这个禅道建需求时来源必填。可选值：customer 客户、user 用户、po 产品经理、market 市场、service 客服、operation 运营、support 技术支持、competitor 竞争对手、partner 合作伙伴、dev 开发人员、tester 测试人员、bug Bug、forum 论坛、other 其它。
+
 - 用户说了来源就传 `-Source`；脚本会记住，之后不传就沿用上一次的。
 - 报错 `『来源』不能为空` 说明还没记住过：问用户来源选哪个，带 `-Source` 重跑。
 
@@ -57,16 +60,16 @@ zentao.ps1 sync -Md "<md完整路径>" [-Product <产品ID>] [-Source <来源>] 
 
 按返回的 `result` 处理：
 
-| result | 含义 | 你要做的 |
-|---|---|---|
-| `CREATED` | 新建了需求 | 告诉用户需求编号 |
-| `NEED_PRODUCT`（在 ERROR 的 message 里） | 新需求没给产品 | 执行 `products`，把列表给用户选，再带 `-Product` 重跑 |
-| `NO_CHANGE` | md 没变 | 不做任何事 |
-| `NEED_REVIEWER` | md 变了，变更要走评审但没给评审人 | 问用户评审人是谁（可执行 `users` 把姓名换成账号），带 `-Reviewer` 重跑。只有用户明确说"不用评审"才用 `-NoReview` |
-| `CHANGED` | 已提交变更 | 看返回的 `tasks`，不为空就按"任务"一节更新受影响的任务 |
-| `REMOTE_CHANGED` | 有人在禅道上改过这个需求 | **以禅道为主**，见下 |
-| `RECREATED` | 原需求在禅道上被删了，脚本已自动重新发布为新需求 | 见下方"需求被删除后重新发布" |
-| `ERROR` | 失败 | 把 message 原样告诉用户；`NOT_LOGGED_IN` 按"账号"处理 |
+| result                                   | 含义                                             | 你要做的                                                     |
+| ---------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------ |
+| `CREATED`                                | 新建了需求                                       | 告诉用户需求编号                                             |
+| `NEED_PRODUCT`（在 ERROR 的 message 里） | 新需求没给产品                                   | 执行 `products`，把列表给用户选，再带 `-Product` 重跑        |
+| `NO_CHANGE`                              | md 没变                                          | 不做任何事                                                   |
+| `NEED_REVIEWER`                          | md 变了，变更要走评审但没给评审人                | 问用户评审人是谁（可执行 `users` 把姓名换成账号），带 `-Reviewer` 重跑。只有用户明确说"不用评审"才用 `-NoReview` |
+| `CHANGED`                                | 已提交变更                                       | 看返回的 `tasks`，不为空就按"任务"一节更新受影响的任务       |
+| `REMOTE_CHANGED`                         | 有人在禅道上改过这个需求                         | **以禅道为主**，见下                                         |
+| `RECREATED`                              | 原需求在禅道上被删了，脚本已自动重新发布为新需求 | 见下方"需求被删除后重新发布"                                 |
+| `ERROR`                                  | 失败                                             | 把 message 原样告诉用户；`NOT_LOGGED_IN` 按"账号"处理        |
 
 ### REMOTE_CHANGED（禅道为主）
 
