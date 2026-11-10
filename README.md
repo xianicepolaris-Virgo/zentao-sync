@@ -15,7 +15,7 @@
 把本仓库克隆到你的技能目录下，文件夹名为 `zentao-sync`：
 
 ```
-git clone https://github.com/<OWNER>/zentao-sync "<技能目录>\zentao-sync"
+git clone https://github.com/xianicepolaris-Virgo/zentao-sync "<技能目录>\zentao-sync"
 ```
 
 常见技能目录：
@@ -26,7 +26,7 @@ git clone https://github.com/<OWNER>/zentao-sync "<技能目录>\zentao-sync"
 | Claude Code | `%USERPROFILE%\.claude\skills` |
 | 其他支持 SKILL.md 的 agent | 以该 agent 文档为准 |
 
-没有 git 时：下载 `https://github.com/<OWNER>/zentao-sync/archive/refs/heads/main.zip`，解压后把文件夹改名为 `zentao-sync` 放进技能目录。
+没有 git 时：下载 `https://github.com/xianicepolaris-Virgo/zentao-sync/archive/refs/heads/main.zip`，解压后把文件夹改名为 `zentao-sync` 放进技能目录。
 
 不支持技能的 agent：克隆到任意目录，在它的规则文件（如 `AGENTS.md`）里加一句：
 "涉及禅道时，先读 `<路径>\zentao-sync\SKILL.md` 并照做。"
